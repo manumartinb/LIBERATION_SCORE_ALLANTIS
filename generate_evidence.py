@@ -217,7 +217,14 @@ def load_dataset() -> Dataset:
         raise FileNotFoundError(f"TENSION daily CSV not found: {TENSION_DAILY_CSV}")
 
     pnl_cols = [f"PnL_d{d:03d}_mediana" for d in WINDOWS]
-    extra_cols = [f"PnL_d{PNL_REF_HORIZON:03d}_mediana", "PnL_d050_mediana", SPX_FILTER_COL]
+    # Window-forward needs PnL_d{t+x} where t in WF_OBS_DAYS and x in WF_FORWARDS
+    # max(t+x) = 40 + 50 = 90, so we need to load PnL_d050..d090 in addition to d001..d049
+    wf_extra_pnl = [f"PnL_d{d:03d}_mediana" for d in range(50, 91)]
+    wf_extra_spx = [f"SPX_chg_pct_d{d:03d}" for d in WF_OBS_DAYS + [t + x for t in WF_OBS_DAYS for x in WF_FORWARDS] if d > 0]
+    extra_cols = list(dict.fromkeys(
+        [f"PnL_d{PNL_REF_HORIZON:03d}_mediana", "PnL_d050_mediana", SPX_FILTER_COL]
+        + wf_extra_pnl + wf_extra_spx
+    ))
     needed_no_dia = set(pnl_cols + extra_cols)
 
     # Allantis: BOM UTF-8, date column is 'dia'.
@@ -858,24 +865,37 @@ def plot_window_forward(wf: pd.DataFrame, out_path: Path) -> bool:
 
     filters_order = WF_SPX_FILTERS
     forwards = WF_FORWARDS
-    obs_days = sorted([int(t) for t in wf["t"].unique()])
+    # Use fixed WF_OBS_DAYS (NOT wf["t"].unique()) so missing cells appear as gaps,
+    # NOT broadcast/silently-omitted. This prevents the chart from showing same value
+    # repeated when a column was missing for some t.
+    obs_days = list(WF_OBS_DAYS)
     n_obs = len(obs_days)
 
     fig, axes = plt.subplots(3, 2, figsize=(13, 11), sharey="col")
     for i, flt in enumerate(filters_order):
         for j, fwd in enumerate(forwards):
             ax = axes[i][j]
-            sub = wf[(wf["spx_filter"] == flt) & (wf["x"] == fwd)].sort_values("t")
-            if sub.empty:
+            sub = wf[(wf["spx_filter"] == flt) & (wf["x"] == fwd)]
+            # Reindex against full obs_days; missing rows become NaN (not broadcast)
+            sub = sub.set_index("t").reindex(obs_days)
+            if sub["high_mean"].isna().all():
                 ax.text(0.5, 0.5, "no data", ha="center", va="center", color=DARK_MUTED)
+                ax.set_xticks(np.arange(n_obs))
+                ax.set_xticklabels([f"t={t}" for t in obs_days], fontsize=9)
+                ax.set_title(f"forward +{fwd}d  |  filtro: {flt}", fontsize=10)
                 continue
             x = np.arange(n_obs)
             w = 0.36
-            ax.bar(x - w / 2, sub["high_mean"].values, w, color=COLOR_FAV,
-                   edgecolor=DARK_BORDER, linewidth=0.7,
+            high_vals = sub["high_mean"].to_numpy(dtype=float)
+            low_vals = sub["low_mean"].to_numpy(dtype=float)
+            high_mask_finite = np.isfinite(high_vals)
+            low_mask_finite = np.isfinite(low_vals)
+            # Plot only finite bars (NaN positions left empty as visual gap)
+            ax.bar(x[high_mask_finite] - w / 2, high_vals[high_mask_finite], w,
+                   color=COLOR_FAV, edgecolor=DARK_BORDER, linewidth=0.7,
                    label="HIGH (TENSION P80+)" if (i == 0 and j == 0) else None)
-            ax.bar(x + w / 2, sub["low_mean"].values, w, color=COLOR_ADV,
-                   edgecolor=DARK_BORDER, linewidth=0.7,
+            ax.bar(x[low_mask_finite] + w / 2, low_vals[low_mask_finite], w,
+                   color=COLOR_ADV, edgecolor=DARK_BORDER, linewidth=0.7,
                    label="LOW (TENSION P20-)" if (i == 0 and j == 0) else None)
             ax.axhline(0, color=DARK_MUTED, linewidth=0.7)
             ax.set_xticks(x)
@@ -885,18 +905,23 @@ def plot_window_forward(wf: pd.DataFrame, out_path: Path) -> bool:
                 ax.set_ylabel(f"Delta PnL en proximos {fwd}d (pts)", fontsize=9)
             if i == 2:
                 ax.set_xlabel("Observation day t (cuando miramos TENSION)", fontsize=9)
-            for k, (h_, lo_, nh, nl) in enumerate(zip(
-                sub["high_mean"].values, sub["low_mean"].values,
-                sub["N_high"].values, sub["N_low"].values
-            )):
+            for k in range(n_obs):
+                h_ = high_vals[k]
+                lo_ = low_vals[k]
                 if np.isfinite(h_):
                     ax.text(k - w / 2, h_, f"{h_:+.1f}",
                             ha="center", va="bottom" if h_ >= 0 else "top",
                             color=DARK_TEXT, fontsize=7.5)
+                else:
+                    ax.text(k - w / 2, 0, "n/a", ha="center", va="bottom",
+                            color=DARK_MUTED, fontsize=7.5, alpha=0.6)
                 if np.isfinite(lo_):
                     ax.text(k + w / 2, lo_, f"{lo_:+.1f}",
                             ha="center", va="bottom" if lo_ >= 0 else "top",
                             color=DARK_TEXT, fontsize=7.5)
+                else:
+                    ax.text(k + w / 2, 0, "n/a", ha="center", va="bottom",
+                            color=DARK_MUTED, fontsize=7.5, alpha=0.6)
             if i == 0 and j == 0:
                 ax.legend(loc="upper right", fontsize=8, framealpha=0.9,
                           facecolor=DARK_PANEL, edgecolor=DARK_BORDER)

@@ -1,4 +1,4 @@
-Evidence regenerated: 2026-05-03 21:46 CEST
+Evidence regenerated: 2026-05-04 14:19 CEST
 Input: [MAIN RANKEO MT]_combined_ALLANTIS_ALLDAYS.csv
 N trades (filtered): 53,492  N days: 456
 N unfiltered universe: 138,264
